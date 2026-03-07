@@ -1,0 +1,1 @@
+ALTER TABLE public.payments ADD COLUMN gateway text DEFAULT 'easebuzz';
