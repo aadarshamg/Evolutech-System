@@ -112,6 +112,12 @@ serve(async (req) => {
         type: 'PG_CHECKOUT',
         merchantUrls: {
           redirectUrl: `${siteUrl}/payment-result?status=pending&txnid=${txnid}&gateway=phonepe`,
+          /**
+           * PhonePe V2 requires the server-to-server webhook callback to be passed here
+           * depending on your API contract, or it's configured globally in their dashboard.
+           * We pass it here explicitly to ensure PhonePe knows where to send updates.
+           */
+          callbackUrl: `https://${Deno.env.get('SUPABASE_PROJECT_ID')}.supabase.co/functions/v1/phonepe-callback`,
         },
       },
     };
