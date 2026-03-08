@@ -20,8 +20,27 @@ const PaymentResult = () => {
     let pollCount = 0;
     const maxPolls = 15; // Poll for ~30 seconds
 
+    const gateway = params.get("gateway");
+
     const checkStatus = async () => {
       try {
+        if (gateway === 'phonepe') {
+          // Manually ask PhonePe for status via our new edge function
+          const { data, error } = await supabase.functions.invoke('phonepe-status', {
+            body: { txnid }
+          });
+
+          if (!error && data && data.status) {
+            if (data.status === 'success' || data.status === 'failed' || data.status === 'cancelled') {
+              setStatus(data.status);
+              clearInterval(pollInterval);
+              setLoading(false);
+              return; // Stop checking DB if API returned final status
+            }
+          }
+        }
+
+        // Fallback or Easebuzz: Check DB (updated by webhook)
         const { data, error } = await supabase
           .from('payments')
           .select('status')
@@ -39,7 +58,7 @@ const PaymentResult = () => {
             clearInterval(pollInterval);
             setLoading(false);
           } else if (pollCount === 0) {
-            // Give it some time to update from the webhook
+            // Give it some time to update
             setLoading(true);
           }
         }
@@ -63,7 +82,7 @@ const PaymentResult = () => {
     }, 2000);
 
     return () => clearInterval(pollInterval);
-  }, [txnid]);
+  }, [txnid, params]);
 
   const isSuccess = status === "success";
   const isFailed = status === "failed";
