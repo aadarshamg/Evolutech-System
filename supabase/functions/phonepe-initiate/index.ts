@@ -109,7 +109,7 @@ serve(async (req) => {
         udf3: customer_phone,
       },
       paymentFlow: {
-        type: isMobile ? 'B2B_PG' : 'PG_CHECKOUT',
+        type: 'PG_CHECKOUT',
         merchantUrls: {
           redirectUrl: `${siteUrl}/payment-result?status=pending&txnid=${txnid}&gateway=phonepe`,
           /**
