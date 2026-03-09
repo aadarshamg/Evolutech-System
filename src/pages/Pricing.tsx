@@ -68,6 +68,7 @@ const PaymentDialog = ({
     }
     setLoading(true);
     try {
+      const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
       const functionName = gateway === "phonepe" ? "phonepe-initiate" : "easebuzz-initiate";
       const { data, error } = await supabase.functions.invoke(functionName, {
         body: {
@@ -76,6 +77,7 @@ const PaymentDialog = ({
           customer_name: form.name.trim(),
           customer_email: form.email.trim(),
           customer_phone: form.phone.trim(),
+          isMobile, // Request intent deep links for mobile devices
         },
       });
       if (error) throw error;

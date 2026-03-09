@@ -21,7 +21,7 @@ serve(async (req) => {
       throw new Error('PhonePe credentials (PHONEPE_CLIENT_ID or PHONEPE_CLIENT_SECRET) not configured');
     }
 
-    const { amount, description, customer_name, customer_email, customer_phone } = await req.json();
+    const { amount, description, customer_name, customer_email, customer_phone, isMobile } = await req.json();
 
     if (!amount || !customer_name || !customer_email || !customer_phone) {
       return new Response(JSON.stringify({ error: 'Missing required fields: amount, customer_name, customer_email, customer_phone' }), {
@@ -109,7 +109,7 @@ serve(async (req) => {
         udf3: customer_phone,
       },
       paymentFlow: {
-        type: 'PG_CHECKOUT',
+        type: isMobile ? 'B2B_PG' : 'PG_CHECKOUT',
         merchantUrls: {
           redirectUrl: `${siteUrl}/payment-result?status=pending&txnid=${txnid}&gateway=phonepe`,
           /**
@@ -139,14 +139,14 @@ serve(async (req) => {
 
     const ppData = JSON.parse(ppText);
 
-    // V2 response: { orderId, state, redirectUrl } — no 'success' boolean
-    const redirectUrl = ppData.redirectUrl || ppData.data?.redirectUrl;
+    // V2 response: { orderId, state, redirectUrl, intentUrl }
+    const redirectUrl = ppData.intentUrl || ppData.data?.intentUrl || ppData.redirectUrl || ppData.data?.redirectUrl;
     const orderId = ppData.orderId || ppData.data?.orderId;
 
     if (redirectUrl) {
       // Update payment with phonePe order ID
       await supabase.from('payments').update({
-        easebuzz_id: ppData.orderId || ppData.data?.orderId || txnid,
+        easebuzz_id: orderId || txnid,
       }).eq('id', payment.id);
 
       return new Response(JSON.stringify({
