@@ -1,6 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { crypto } from "https://deno.land/std@0.168.0/crypto/mod.ts";
 
 const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
@@ -24,6 +23,7 @@ serve(async (req) => {
 
         const CLIENT_ID = Deno.env.get('PHONEPE_CLIENT_ID');
         const CLIENT_SECRET = Deno.env.get('PHONEPE_CLIENT_SECRET');
+        const CLIENT_VERSION = Deno.env.get('PHONEPE_CLIENT_VERSION') || '1';
 
         if (!CLIENT_ID || !CLIENT_SECRET) {
             throw new Error('PhonePe credentials not configured');
@@ -34,63 +34,74 @@ serve(async (req) => {
             Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
         );
 
-        // Get payment ID mapping because V2 status API often needs the "merchantId" 
         const isSandbox = Deno.env.get('PHONEPE_ENV') === 'sandbox';
 
         // ─────────────────────────────────────────────────
-        // PhonePe V2 Status API
-        // GET /apis/pg-sandbox/pg/v1/status/{merchantId}/{merchantTransactionId}
+        // STEP 1: Get OAuth Token from PhonePe Identity Manager
         // ─────────────────────────────────────────────────
-        const apiBaseUrl = isSandbox
-            ? 'https://api-preprod.phonepe.com/apis/pg-sandbox/pg/v1/status'
-            : 'https://api.phonepe.com/apis/pg/v1/status';
+        const authBaseUrl = isSandbox
+            ? 'https://api-preprod.phonepe.com/apis/pg-sandbox'
+            : 'https://api.phonepe.com/apis/identity-manager';
 
-        const merchantId = CLIENT_ID; // In PhonePe V2, ClientId is often used as MerchantId for status API
-
-        // X-VERIFY checksum for status is: SHA256("/pg/v1/status/" + merchantId + "/" + transactionId + saltKey) + "###" + saltIndex
-        const endpoint = `/pg/v1/status/${merchantId}/${txnid}`;
-
-        // Extract Salt Index from Salt Key (e.g., xxx-x-x-1 -> 1)
-        let saltIndex = '1';
-        if (CLIENT_SECRET.includes('-') && !isNaN(parseInt(CLIENT_SECRET.split('-').pop()!))) {
-            saltIndex = CLIENT_SECRET.split('-').pop()!;
-        }
-
-        const checksumString = endpoint + CLIENT_SECRET;
-        const encoder = new TextEncoder();
-        const hashBuffer = await crypto.subtle.digest('SHA-256', encoder.encode(checksumString));
-        const hashArray = Array.from(new Uint8Array(hashBuffer));
-        const checksum = hashArray.map(b => b.toString(16).padStart(2, '0')).join('') + `###${saltIndex}`;
-
-        console.log(`Checking PhonePe Status for ${txnid}...`);
-
-        const tokenResponse = await fetch(`${apiBaseUrl}/${merchantId}/${txnid}`, {
-            method: 'GET',
+        const tokenResponse = await fetch(`${authBaseUrl}/v1/oauth/token`, {
+            method: 'POST',
             headers: {
-                'Content-Type': 'application/json',
-                'X-VERIFY': checksum,
-                'X-MERCHANT-ID': merchantId,
+                'Content-Type': 'application/x-www-form-urlencoded',
             },
+            body: new URLSearchParams({
+                client_id: CLIENT_ID,
+                client_version: CLIENT_VERSION,
+                client_secret: CLIENT_SECRET,
+                grant_type: 'client_credentials',
+            }),
         });
 
         const tokenText = await tokenResponse.text();
-        console.log('PhonePe Status API raw response:', tokenText);
-
         if (!tokenResponse.ok) {
-            console.error("PhonePe API Error:", tokenResponse.status, tokenText);
-            throw new Error(`Failed to check PhonePe status: ${tokenText}`);
+            throw new Error(`PhonePe OAuth token request failed (${tokenResponse.status}): ${tokenText}`);
         }
 
         const tokenData = JSON.parse(tokenText);
-        const code = tokenData.code || tokenData.data?.code;
+        const accessToken = tokenData.access_token;
+        if (!accessToken) {
+            throw new Error(`PhonePe OAuth did not return an access_token. Response: ${tokenText}`);
+        }
+
+        // ─────────────────────────────────────────────────
+        // STEP 2: PhonePe V2 Status API
+        // GET /checkout/v2/order/{merchantOrderId}/status
+        // ─────────────────────────────────────────────────
+        const apiBaseUrl = isSandbox
+            ? 'https://api-preprod.phonepe.com/apis/pg-sandbox/checkout/v2'
+            : 'https://api.phonepe.com/apis/pg/checkout/v2';
+
+        console.log(`Checking PhonePe V2 Status for ${txnid}...`);
+
+        // IMPORTANT: In V2 OAuth, the merchantId is NOT required in the URL, just the txnid
+        const statusResponse = await fetch(`${apiBaseUrl}/order/${txnid}/status`, {
+            method: 'GET',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `O-Bearer ${accessToken}`, // V2 uses O-Bearer, not X-Verify
+            },
+        });
+
+        const statusText = await statusResponse.text();
+        console.log('PhonePe Status API raw response:', statusText);
+
+        if (!statusResponse.ok) {
+            console.error("PhonePe API Error:", statusResponse.status, statusText);
+            throw new Error(`Failed to check PhonePe status: ${statusText}`);
+        }
+
+        const statusObj = JSON.parse(statusText);
+        const state = statusObj.state || statusObj.data?.state;
 
         let paymentStatus = 'pending';
-        if (code === 'PAYMENT_SUCCESS') {
+        if (state === 'COMPLETED') {
             paymentStatus = 'success';
-        } else if (code === 'PAYMENT_ERROR' || code === 'PAYMENT_DECLINED' || code === 'TIMED_OUT') {
+        } else if (state === 'FAILED' || state === 'ABORTED' || state === 'TIMED_OUT') {
             paymentStatus = 'failed';
-        } else if (code === 'PAYMENT_CANCELLED') {
-            paymentStatus = 'cancelled';
         }
 
         // Update DB
@@ -98,7 +109,7 @@ serve(async (req) => {
             .update({ status: paymentStatus })
             .eq('transaction_id', txnid);
 
-        return new Response(JSON.stringify({ success: true, status: paymentStatus, data: tokenData }), {
+        return new Response(JSON.stringify({ success: true, status: paymentStatus, data: statusObj }), {
             status: 200,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
